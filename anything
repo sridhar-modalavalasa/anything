@@ -1,0 +1,342 @@
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sDisallowedRbacApiGroups
+metadata:
+  name: prevent-rbac-wildcard-apigroups
+  annotations:
+    description: |-
+      Wildcards should not be used to define permissions.
+spec:
+  enforcementAction: deny
+  match:
+    kinds:
+      - apiGroups: ["rbac.authorization.k8s.io"]
+        kinds: ["Role", "ClusterRole"]       
+  parameters:
+    policy_id: CSP1219.A
+    apigroups: ["*"]
+    excluded:
+      cluster_roles:
+        - cluster-admin
+        - gatekeeper-manager-role
+        - system:controller:disruption-controller
+        - system:controller:generic-garbage-collector
+        - system:controller:horizontal-pod-autoscaler
+        - system:controller:namespace-controller
+        - system:controller:resourcequota-controller
+        - system:kube-controller-manager
+        - tu:cluster:admin
+        - tu:cluster:readonly
+        - wiz-cluster-reader
+        - cattle-admin
+        - flux-sa-generator-role
+      roles:
+        - flux-role
+        - velero-server
+    # Regex to match all project IDs, assuming they follow a specific pattern.
+    project_id_regex: "^p-[a-z0-9]{5,6}-namespaces-edit$"
+
+
+
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: k8sdisallowedrbacapigroups
+  annotations:
+    description: Requires rbac roles to have an apiGroup different
+      from the ones in a specified list.
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sDisallowedRbacApiGroups
+      validation:
+        openAPIV3Schema:
+          type: object
+          properties:
+            policy_id:
+              type: string
+            apigroups:
+              type: array
+              items:
+                type: string
+            excluded:
+              type: object
+              properties:
+                cluster_roles:
+                  type: array
+                  items:
+                    type: string
+                roles:
+                  type: array
+                  items:
+                    type: string
+            project_id_regex:
+              type: string
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |-
+        # Custom logic for template
+        package k8sdisallowedrbacapigroups
+
+        import data.lib.core
+        import data.lib.security
+        import future.keywords
+
+        violation[msg] {
+            core.target_operations(["CREATE", "UPDATE", ""])
+            input.review.object.kind == "Role"
+            not is_excluded(input.review.object.metadata.name, input.parameters.excluded.roles, input.parameters.project_id_regex)
+            check_apigroups
+            not security.valid_exception
+            msg := core.format_msg(
+                core.policy_id,
+                input.review.kind.kind,
+                input.review.object.metadata.name,
+                sprintf("Role uses a disallowed apiGroup. Disallowed apiGroups include <%v>", [input.parameters.apigroups])
+            )
+        }
+
+        violation[msg] {
+            core.target_operations(["CREATE", "UPDATE", ""])
+            input.review.object.kind == "ClusterRole"
+            not is_excluded(input.review.object.metadata.name, input.parameters.excluded.cluster_roles, input.parameters.project_id_regex)
+            check_apigroups
+            not security.valid_exception
+            msg := core.format_msg(
+                core.policy_id,
+                input.review.kind.kind,
+                input.review.object.metadata.name,
+                sprintf("ClusterRole uses a disallowed apiGroup. Disallowed apiGroups include <%v>", [input.parameters.apigroups])
+            )
+        }
+
+        check_apigroups {
+            some apigroup in input.parameters.apigroups
+            apigroup in input_apigroups
+        }
+
+        input_apigroups[v] {
+            v := input.review.object.rules[_].apiGroups[_]
+        }
+
+        is_excluded(name, static_exclusions, regex) = true {
+            core.contains_element(static_exclusions, name)
+        } else = true {
+            regex.match(regex, name)
+        } else = false { true }
+      libs:
+        - |-
+          # Common logic shared across many templates
+          package lib.core
+
+          # Consistent msg format with policy Id
+          policy_id := input.parameters.policy_id
+
+          format_msg(id, kind, name, hint) = msg_fmt {
+              msg_fmt := {
+                  "msg": sprintf("%s/%s/%s: %s", [id, kind, name, hint]),
+                  "details": {"policyID": id}
+              }
+          }
+
+          has_field(obj, field) = true {
+              not object.get(obj, field, "N_DEFINED") == "N_DEFINED"
+          } else = false { true }
+
+          contains_element(arr, elem) = true {
+            arr[_] = elem
+          } else = false { true }
+
+          # Check Operation type
+          target_operations(allowed_operations) = true {
+            contains_element(allowed_operations, input.review.operation)
+          } else = false { true }
+        - |-
+          # Security logic shared across many templates
+          package lib.security
+          import data.lib.core
+
+          # For expiry, allow 2 weeks past due before blocking
+          grace_period = 60 * 60 * 24 * 7 * 2 * 1000000000
+
+          valid_exception() = true {
+            # Check against cached exceptions
+            cached_exceptions = data.inventory.cluster["templates.gatekeeper.sh/v1"]["Exception"]["gk-exceptions"]["spec"]["exceptions"][_]
+            # check for label check
+            cached_exceptions.match.check_labels == false
+            # Compare match criteria
+            core.contains_element(cached_exceptions.match.policies, core.policy_id)
+            glob.match(cached_exceptions.match.namespaces[_], [], input.review.object.metadata.namespace)
+            # Check expiry with offset by grace period
+            due_date := time.parse_rfc3339_ns(sprintf("%vT00:00:00-00:00", [cached_exceptions.expires]))
+            time.now_ns() < due_date + grace_period     
+          } else = true  {
+            # Check against cached exceptions
+            cached_exceptions = data.inventory.cluster["templates.gatekeeper.sh/v1"]["Exception"]["gk-exceptions"]["spec"]["exceptions"][_]
+            cached_exceptions.exception == input.review.object.metadata.labels["gatekeeper.sh/exception"]
+            # Compare match criteria
+            core.contains_element(cached_exceptions.match.policies, core.policy_id)
+            glob.match(cached_exceptions.match.namespaces[_], [], input.review.object.metadata.namespace)
+            # Check expiry with offset by grace period
+            due_date := time.parse_rfc3339_ns(sprintf("%vT00:00:00-00:00", [cached_exceptions.expires]))
+            time.now_ns() < due_date + grace_period                         
+          } else = false { true }
+
+
+
+
+package k8sdisallowedrbacapigroups
+
+test_input_allowed_role {
+  input := {
+    "review": input_review("Role", input_allowed),
+    "parameters": {"policy_id": "mock_id", "apigroups": ["*"]}
+  }
+  results := violation with input as input
+  count(results) == 0
+}
+
+test_input_denied_role {
+  input := {
+    "review": input_review("Role", input_not_allowed),
+    "parameters": {"policy_id": "mock_id", "apigroups": ["batch"]}
+  }
+  results := violation with input as input
+  count(results) == 1
+}
+
+test_input_denied_role_with_exception {
+  input := {
+    "review": input_review("Role", input_not_allowed), # would fail without exception
+    "parameters": {"policy_id": "mock_id", "apigroups": ["batch"]}
+  }
+  results := violation with input as input with data.inventory as mock_data
+  count(results) == 0
+}
+
+test_input_denied_multiple_role {
+  input := {
+    "review": input_review("Role", input_not_allowed_multiple),
+    "parameters": {"policy_id": "mock_id", "apigroups": ["", "extensions"]}
+  }
+  results := violation with input as input
+  count(results) == 1
+}
+
+test_input_denied_wildcard_role {
+  input := {
+    "review": input_review("Role", input_not_allowed_wildcard),
+    "parameters": {"policy_id": "mock_id", "apigroups": ["*"]}
+  }
+  results := violation with input as input
+  count(results) == 1
+}
+
+test_input_allowed_clusterrole {
+  input := {
+    "review": input_review("ClusterRole", input_allowed),
+    "parameters": {"policy_id": "mock_id", "apigroups": ["*"]}
+  }
+  results := violation with input as input
+  count(results) == 0
+}
+
+test_input_excluded_clusterrole {
+  input := {
+    "review": input_review("ClusterRole", input_not_allowed),
+    "parameters": {
+      "policy_id": "mock_id",
+      "apigroups": ["batch"],
+      "excluded": {"cluster_roles": ["my-rbac"]}
+    }
+  }
+  results := violation with input as input
+  count(results) == 0
+}
+
+test_input_denied_clusterrole {
+  input := {
+    "review": input_review("ClusterRole", input_not_allowed),
+    "parameters": {
+      "policy_id": "mock_id",
+      "apigroups": ["batch"],
+      "excluded": {"cluster_roles": []}
+    }
+  }
+  results := violation with input as input
+  count(results) == 1
+}
+
+check_apigroups {
+  some apigroup in input.parameters.apigroups
+  apigroup in input_apigroups
+}
+
+input_apigroups[v] {
+  v := input.review.object.rules[_].apiGroups[_]
+}
+
+is_excluded(name, static_exclusions, regex) = true {
+  core.contains_element(static_exclusions, name)
+} else = true {
+  regex.match(regex, name)
+} else = false { true }
+
+input_review(kind, obj) = {"kind": {"kind": kind}, "object": obj}
+input_allowed = {
+  "metadata": {"name": "test"},
+  "rules": [{
+    "apiGroups": ["batch"],
+    "resources": ["jobs"],
+    "verbs": ["get", "list", "watch"]
+  }]
+}
+
+input_not_allowed = {
+  "metadata": {"name": "test"},
+  "rules": [{
+    "apiGroups": ["batch"],
+    "resources": ["jobs"],
+    "verbs": ["get", "list", "watch"]
+  }]
+}
+
+input_not_allowed_multiple = {
+  "metadata": {"name": "test"},
+  "rules": [{
+    "apiGroups": ["", "extensions"],
+    "resources": ["jobs"],
+    "verbs": ["get", "list", "watch"]
+  }]
+}
+
+input_not_allowed_wildcard = {
+  "metadata": {"name": "test"},
+  "rules": [{
+    "apiGroups": ["*"],
+    "resources": ["jobs"],
+    "verbs": ["get", "list", "watch"]
+  }]
+}
+
+mock_data := {
+  "cluster": {
+    "templates.gatekeeper.sh/v1": {
+      "Exception": {
+        "gk-exceptions": {
+          "spec": {
+            "exceptions": [{
+              "exception": "true",
+              "expires": "2023-09-30",
+              "match": {
+                "check_labels": false,
+                "namespaces": ["*"],
+                "policies": ["mock_id"]
+              }
+            }]
+          }
+        }
+      }
+    }
+  }
+}
