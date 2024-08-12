@@ -1,0 +1,407 @@
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sDisallowedRbacResources
+metadata:
+  name: prevent-rbac-wildcard-resources
+  annotations:
+    description: |-
+      Wildcards should not be used to define permissions.
+spec:
+  enforcementAction: deny
+  match:
+    kinds:
+      - apiGroups: ["rbac.authorization.k8s.io"]
+        kinds: ["Role", "ClusterRole"]            
+  parameters:
+    policy_id: CSP1219.B
+    resources: ["*"]
+    excluded:
+      cluster_roles:
+        - cluster-admin # default cluster-admin role
+        - crd-controller # Flux cluster role
+        - crd-controller-flux-system      # Flux crd controller role
+        - flux-edit #Flux edit role
+        - flux-view #Flux view role
+        - gatekeeper-manager-role         # gatekeeper manager role
+        - system:controller:generic-garbage-collector # cleanup cluster resources role
+        - system:controller:horizontal-pod-autoscaler # HPA role
+        - system:controller:namespace-controller      # namespaces status monitor role
+        - system:controller:resourcequota-controller  # resource quota monitoring role
+        - system:kube-controller-manager  # kube controller manager role
+        - tu:cluster:admin     # TU cluster admin
+        - tu:cluster:readonly  # TU cluster read only
+        - wiz-cluster-reader # Role used by wiz to read cluster metadata
+        - aws-node # Role used by aws-node CNI pods
+        - eks:addon-manager        # EKS add ons manager role  
+        - tigera-operator # Calico Tigera Operator                   
+        - cattle-admin 
+        - flux-sa-generator-role # flux operator identity having cluster level role which provides permissions for flux-role (namespaced)
+        - p-62hdw-namespaces-edit
+        - cattle-fleet-system-fleet-agent-role
+        - p-4dhsx-namespaces-edit
+        - cluster-owner
+        - project-owner
+        - p-8hf8c-namespaces-edit
+        - p-mwl2z-namespaces-edit #ch03-prd-c2
+        - p-vq6cb-namespaces-edit #onedev trust dc15-nonprd-c2
+        - p-qbf68-namespaces-edit #kongapim ch03-nonprd-c2
+        - p-9kbnt-namespaces-edit #tucc-dev project in dc15-nonprd-c4
+        - p-b7d2c-namespaces-edit #enum stage on boarding in dc15-prd-c2
+        - p-wb5wv-namespaces-edit #enum stage on boarding in ch03-prd-c2
+      roles:
+        - flux-role  # namespaced object which creates by default by flux-sa-generator-role    
+        - velero-server # velero role to configure the velero backup for a cron interval
+      # Regex to match all project IDs, assuming they follow a specific pattern.
+      project_id_regex: "^p-[a-z0-9]{5,6}-namespaces-edit$"
+
+
+package k8sdisallowedrbacresources
+
+test_input_allowed_role {
+  input := {
+    "review": input_review("Role", input_allowed),
+    "parameters": {"policy_id": "mock_id", "resources": ["*"], "project_id_regex": "^p-[a-z0-9]{5,6}-namespaces-edit$"}
+  }
+  results := violation with input as input
+  count(results) == 0
+}
+
+test_input_denied_role {
+  input := {
+    "review": input_review("Role", input_not_allowed),
+    "parameters": {"policy_id": "mock_id", "resources": ["secrets"], "project_id_regex": "^p-[a-z0-9]{5,6}-namespaces-edit$"}
+  }
+  results := violation with input as input
+  count(results) == 1
+}
+
+test_input_denied_role_with_exception {
+  input := {
+    "review": input_review("Role", input_not_allowed),
+    "parameters": {"policy_id": "mock_id", "resources": ["secrets"], "project_id_regex": "^p-[a-z0-9]{5,6}-namespaces-edit$"}
+  }
+  results := violation with input as input with data.inventory as mock_data
+  count(results) == 0
+}
+
+test_input_denied_multiple_role {
+  input := {
+    "review": input_review("Role", input_not_allowed_multiple),
+    "parameters": {"policy_id": "mock_id", "resources": ["", "jobs"], "project_id_regex": "^p-[a-z0-9]{5,6}-namespaces-edit$"}
+  }
+  results := violation with input as input
+  count(results) == 1
+}
+
+test_input_denied_wildcard_role {
+  input := {
+    "review": input_review("Role", input_not_allowed_wildcard),
+    "parameters": {"policy_id": "mock_id", "resources": ["*"], "project_id_regex": "^p-[a-z0-9]{5,6}-namespaces-edit$"}
+  }
+  results := violation with input as input
+  count(results) == 1
+}
+
+test_input_allowed_clusterrole {
+  input := {
+    "review": input_review("ClusterRole", input_allowed),
+    "parameters": {
+      "policy_id": "mock_id",
+      "resources": ["*"],
+      "excluded": {"cluster_roles": [], "project_id_regex": "^p-[a-z0-9]{5,6}-namespaces-edit$"}
+    }
+  }
+  results := violation with input as input
+  count(results) == 0
+}
+
+test_input_excluded_clusterrole {
+  input := {
+    "review": input_review("ClusterRole", input_not_allowed),
+    "parameters": {
+      "policy_id": "mock_id",
+      "resources": ["secrets"],
+      "excluded": {"cluster_roles": ["my-rbac"], "project_id_regex": "^p-[a-z0-9]{5,6}-namespaces-edit$"}
+    }
+  }
+  results := violation with input as input
+  count(results) == 0
+}
+
+test_input_denied_clusterrole {
+  input := {
+    "review": input_review("ClusterRole", input_not_allowed),
+    "parameters": {
+      "policy_id": "mock_id",
+      "resources": ["secrets"],
+      "excluded": {"cluster_roles": [], "project_id_regex": "^p-[a-z0-9]{5,6}-namespaces-edit$"}
+    }
+  }
+  results := violation with input as input
+  count(results) == 1
+}
+
+test_input_denied_multiple_clusterrole {
+  input := {
+    "review": input_review("ClusterRole", input_not_allowed_multiple),
+    "parameters": {
+      "policy_id": "mock_id",
+      "resources": ["pods", "secrets"],
+      "excluded": {"cluster_roles": [], "project_id_regex": "^p-[a-z0-9]{5,6}-namespaces-edit$"}
+    }
+  }
+  results := violation with input as input
+  count(results) == 1
+}
+
+input_review(kind, resources) = output {
+  output = {
+    "kind": {"kind": kind},
+    "operation": "UPDATE",
+    "object": {
+      "kind": kind,
+      "metadata": {
+        "name": "my-rbac",
+        "namespace": "mock_namespace",
+        "labels": {
+          "gatekeeper.sh/exception": "mock_exception" # only has effect if mock_data added to test
+        },
+      },
+      "rules": [
+        {
+          "apiGroups": ["*"],
+          "resources": resources,
+          "verbs": ["*"]
+        }
+      ]
+    }
+  }
+}
+
+input_allowed = ["pods"]
+input_not_allowed = ["secrets"]
+input_not_allowed_multiple = ["jobs", "secrets"]
+input_not_allowed_wildcard = ["*"]
+
+mock_data := {
+  "cluster": {
+    "templates.gatekeeper.sh/v1": {
+      "Exception": {
+        "gk-exceptions": {
+          "spec": {
+            "exceptions": [{
+              "exception": "mock_exception",
+              "expires": "2261-12-31", # 64-bit count of nanosecond tops at 2261
+              "match": {
+                "policies": ["mock_id"],
+                "namespaces": ["mock_*"]
+              }
+            }]
+          }
+        }
+      }
+    }
+  }
+}
+
+
+-------
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sDisallowedRbacVerbs
+metadata:
+  name: prevent-rbac-wildcard-verbs
+  annotations:
+    description: |-
+      Wildcards should not be used to define permissions.
+spec:
+  enforcementAction: deny
+  match:
+    kinds:
+      - apiGroups: ["rbac.authorization.k8s.io"]
+        kinds: ["Role", "ClusterRole"]             
+  parameters:
+    policy_id: CSP1219.C
+    verbs: ["*"]
+    excluded:
+      cluster_roles:
+        - cluster-admin                # default cluster-admin role
+        - crd-controller               # Flux cluster role
+        - crd-controller-flux-system   # Flux crd controller role
+        - eks:cloud-controller-manager # cloud controller role
+        - prometheus-operator          # promethus operator role
+        - system:kubelet-api-admin     # node monitor role
+        - tu:cluster:admin             # TU cluster admin role
+        - cattle-admin        
+        - flux-sa-generator-role # flux operator identity having cluster level role which provides permissions for flux-role (namespaced)
+        - p-62hdw-namespaces-edit
+        - cattle-fleet-system-fleet-agent-role
+        - p-4dhsx-namespaces-edit
+        - cluster-owner
+        - project-owner
+        - p-k28wb-namespaces-edit # for ch03-nonprd-c2 cluster namespace unlock
+        - p-8hf8c-namespaces-edit # ch03-nonprd-c2
+        - p-q6glp-namespaces-edit # dc15-prd-c2
+        - p-2mfzb-namespaces-edit #CH03-NonPrd-C2 - Global Triggers
+        - p-mwl2z-namespaces-edit #ch03-prd-c2
+        - p-cw8l7-namespaces-edit #ch03-prd-c2 TUCI Prod
+        - p-t6gnb-namespaces-edit #dc15-prd-c2 TUCI Prod
+        - p-vq6cb-namespaces-edit #onedev trust dc15-nonprd-c2
+        - p-qbf68-namespaces-edit #kongapim ch03-nonprd-c2
+        - p-9kbnt-namespaces-edit #tucc-dev project in dc15-nonprd-c4
+        - p-b7d2c-namespaces-edit #enum stage on boarding in dc15-prd-c2
+        - p-wb5wv-namespaces-edit #enum stage on boarding in ch03-prd-c2
+      roles:
+        - flux-role  # namespaced object which creates by default by flux-sa-generator-role
+        - velero-server # velero role to configure the velero backup for a cron interval
+      # Regex to match all project IDs, assuming they follow a specific pattern.
+      project_id_regex: "^p-[a-z0-9]{5,6}-namespaces-edit$"
+
+
+
+package k8sdisallowedrbacverbs
+
+test_input_allowed_role {
+  input := {
+    "review": input_review("Role", input_allowed),
+    "parameters": {"policy_id": "mock_id", "verbs": ["*"], "project_id_regex": "^p-[a-z0-9]{5,6}-namespaces-edit$"}
+  }
+  results := violation with input as input
+  count(results) == 0
+}
+
+test_input_denied_role {
+  input := {
+    "review": input_review("Role", input_not_allowed),
+    "parameters": {"policy_id": "mock_id", "verbs": ["delete"], "project_id_regex": "^p-[a-z0-9]{5,6}-namespaces-edit$"}
+  }
+  results := violation with input as input
+  count(results) == 1
+}
+
+test_input_denied_role_with_exception {
+  input := {
+    "review": input_review("Role", input_not_allowed),
+    "parameters": {"policy_id": "mock_id", "verbs": ["delete"], "project_id_regex": "^p-[a-z0-9]{5,6}-namespaces-edit$"}
+  }
+  results := violation with input as input with data.inventory as mock_data
+  count(results) == 0
+}
+
+test_input_denied_multiple_role {
+  input := {
+    "review": input_review("Role", input_not_allowed_multiple),
+    "parameters": {"policy_id": "mock_id", "verbs": ["delete", "get"], "project_id_regex": "^p-[a-z0-9]{5,6}-namespaces-edit$"}
+  }
+  results := violation with input as input
+  count(results) == 1
+}
+
+test_input_denied_wildcard_role {
+  input := {
+    "review": input_review("Role", input_not_allowed_wildcard),
+    "parameters": {"policy_id": "mock_id", "verbs": ["*"], "project_id_regex": "^p-[a-z0-9]{5,6}-namespaces-edit$"}
+  }
+  results := violation with input as input
+  count(results) == 1
+}
+
+test_input_allowed_clusterrole {
+  input := {
+    "review": input_review("ClusterRole", input_allowed),
+    "parameters": {
+      "policy_id": "mock_id",
+      "verbs": ["*"],
+      "excluded": {"cluster_roles": [], "project_id_regex": "^p-[a-z0-9]{5,6}-namespaces-edit$"}
+    }
+  }
+  results := violation with input as input
+  count(results) == 0
+}
+
+test_input_excluded_clusterrole {
+  input := {
+    "review": input_review("ClusterRole", input_not_allowed),
+    "parameters": {
+      "policy_id": "mock_id",
+      "verbs": ["delete"],
+      "excluded": {"cluster_roles": ["my-rbac"], "project_id_regex": "^p-[a-z0-9]{5,6}-namespaces-edit$"}
+    }
+  }
+  results := violation with input as input
+  count(results) == 0
+}
+
+test_input_denied_clusterrole {
+  input := {
+    "review": input_review("ClusterRole", input_not_allowed),
+    "parameters": {
+      "policy_id": "mock_id",
+      "verbs": ["delete"],
+      "excluded": {"cluster_roles": [], "project_id_regex": "^p-[a-z0-9]{5,6}-namespaces-edit$"}
+    }
+  }
+  results := violation with input as input
+  count(results) == 1
+}
+
+test_input_denied_multiple_clusterrole {
+  input := {
+    "review": input_review("ClusterRole", input_not_allowed_multiple),
+    "parameters": {
+      "policy_id": "mock_id",
+      "verbs": ["delete", "get"],
+      "excluded": {"cluster_roles": [], "project_id_regex": "^p-[a-z0-9]{5,6}-namespaces-edit$"}
+    }
+  }
+  results := violation with input as input
+  count(results) == 1
+}
+
+input_review(kind, verbs) = output {
+  output = {
+    "kind": {"kind": kind},
+    "operation": "UPDATE",
+    "object": {
+      "kind": kind,
+      "metadata": {
+        "name": "my-rbac",
+        "namespace": "mock_namespace",
+        "labels": {
+          "gatekeeper.sh/exception": "mock_exception" # only has effect if mock_data added to test
+        },
+      },
+      "rules": [
+        {
+          "apiGroups": ["*"],
+          "resources": ["*"],
+          "verbs": verbs
+        }
+      ]
+    }
+  }
+}
+
+input_allowed = ["get"]
+input_not_allowed = ["delete"]
+input_not_allowed_multiple = ["get", "delete"]
+input_not_allowed_wildcard = ["*"]
+
+mock_data := {
+  "cluster": {
+    "templates.gatekeeper.sh/v1": {
+      "Exception": {
+        "gk-exceptions": {
+          "spec": {
+            "exceptions": [{
+              "exception": "mock_exception",
+              "expires": "2261-12-31", # 64-bit count of nanosecond tops at 2261
+              "match": {
+                "policies": ["mock_id"],
+                "namespaces": ["mock_*"]
+              }
+            }]
+          }
+        }
+      }
+    }
+  }
+}
